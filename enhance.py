@@ -21,13 +21,14 @@ from scipy.sparse.linalg import bicg, bicgstab
 from scipy.signal import convolve2d
 from scipy import fftpack, signal
 import math
+from scipy.sparse import csgraph
 from PIL import Image
 # from AnnoyKNN import *
 
 ALPHA = 2
 PATCH_SIZE = 50
 PATCH_SIZE_RESCALED = int(PATCH_SIZE / ALPHA)
-KERNEL_SIZE= 7
+KERNEL_SIZE = 7
 SIGMA = 1
 WINDOW = 7
 T = 10
@@ -96,6 +97,15 @@ def col2mat(mat, sz):
         print(i)
     return mats
 
+def im2col_new(A, sz):
+    mat = []
+    for j in range(0, A.shape[1] - sz[1] + 1):
+        for i in range(0, A.shape[0] - sz[0] + 1):
+            window = A[i:i + sz[0], j:j + sz[1]].reshape((KERNEL_SIZE, KERNEL_SIZE))
+            window = np.transpose(window)# each individual window
+            window = np.reshape(window, (pow(KERNEL_SIZE, 2)))
+            mat.append(window)
+    return mat
 
 def gkern(kernlen, std):
     """Returns a 2D Gaussian kernel array."""
@@ -111,6 +121,10 @@ def skern(kernlen, window):
     kern = np.sinc(xx)
     return kern
 
+def laplacian(window_size,range):
+    x = np.linspace(-range, range, window_size)
+    xx = np.outer(x, x)
+    return csgraph.laplacian(xx, normed=False)
 
 def RMSE(img1, img2):
     squared_diff = (img1 - img2) ** 2
@@ -127,8 +141,8 @@ def create_patches(img, patch_size):
 
 
 def downscale_patches(patch, alpha):
-    width = len(patch)
-    height = len(patch[0])
+    width = PATCH_SIZE
+    height = PATCH_SIZE
     downscaled_width = int(width / alpha)
     downscaled_height = int(height / alpha)
     downscaled_patch = [[0] * downscaled_height for i in range(downscaled_width)]
@@ -144,6 +158,14 @@ def calc_downscaled_patches(patches, alpha):
     return downscaled_patches
 
 
+def convolve_patches(Rjs, kernel):
+    #col_kernel = im2col(kernel, (KERNEL_SIZE, KERNEL_SIZE))
+    col_r = []
+    for rj in Rjs:
+        col_r.append(np.matmul(rj, kernel))
+    return col_r
+
+"""
 def convolve_patches(patches, kernel):
     convolved_patches = []
     for patch in patches:
@@ -151,6 +173,19 @@ def convolve_patches(patches, kernel):
         #convolved_patch = convolved_patch[PATCH_SIZE_RESCALED: PATCH_SIZE_RESCALED * 2, PATCH_SIZE_RESCALED: PATCH_SIZE_RESCALED * 2]
         convolved_patches.append(convolved_patch)
     return convolved_patches
+"""
+def columnise_patches(r, q):
+    col_r = []
+    col_q = []
+    for patch in r:
+        patch = np.array(patch)
+        col_r.append(np.reshape(patch, (patch.shape[0] * patch.shape[1], 1)))
+
+    for patch in q:
+        patch = np.array(patch)
+        col_q.append(np.reshape(patch, (patch.shape[0] * patch.shape[1], 1)))
+
+    return col_r, col_q
 
 
 def calc_weights_nominative(q, r):
@@ -167,9 +202,35 @@ def calc_weights(r, q):
             weights[i][j] = calc_weights_nominative(q[i], r[j]) / sum
     return weights
 
+def create_S(m, n):
+    S = np.zeros((math.ceil(m/ALPHA), pow(m-n+1, 2)))
+    i = 1
+    j = 0
+    while j < S.shape[0]:
+        if i % ALPHA == 0:
+            i += 1
+        else:
+            S[j][i-1] = 1
+            i += 1
+            j += 1
+
+    return S
+
+def create_Rj(patch, k):
+    C = im2col_new(patch, (KERNEL_SIZE, KERNEL_SIZE))
+    S = create_S(patch.shape[0], KERNEL_SIZE)
+    Rj = np.matmul(S, C)
+    return Rj
+
+def calc_Rj(r, k):
+    Rj = []
+    for patch in r:
+        Rj.append(create_Rj(patch, k))
+    return Rj
+
 def calc_k(r, q, weights):
-    first_matrix = [[0.] * PATCH_SIZE_RESCALED for i in range(PATCH_SIZE_RESCALED)]
-    second_matrix = [[0.] * PATCH_SIZE_RESCALED for i in range(PATCH_SIZE_RESCALED)]
+    first_matrix = [[0.] * pow(KERNEL_SIZE, 2) for i in range(pow(KERNEL_SIZE, 2))]
+    second_matrix = [[0.] * 1 for i in range(pow(KERNEL_SIZE, 2))]
     first_matrix = np.array(first_matrix)
     second_matrix = np.array(second_matrix)
 
@@ -186,7 +247,7 @@ def main():
     img = np.array(img)
     img = img[:, :, 0]
     delta = fftpack.fftshift(scipy.signal.unit_impulse((KERNEL_SIZE, KERNEL_SIZE)))
-    k_hat = delta
+    k_hat = np.reshape(delta, (KERNEL_SIZE * KERNEL_SIZE, 1))
     gaussianKernel = gkern(PATCH_SIZE, SIGMA)
     sincKernel = skern(PATCH_SIZE, WINDOW)
 
@@ -219,22 +280,33 @@ def main():
 
     last_rmse_dif = 1
     r = low_res_patches_r_gauss
+    r = np.array(r)
     q = low_res_patches_q_gauss
+    q = np.array(q)
     iter = 1
+    Rj = []
     while last_rmse_dif > 0:
         last_k = k_hat
-        downsampled_patches = calc_downscaled_patches(r, ALPHA)
-        print("shrunk patches")
-        convolved_patches = convolve_patches(downsampled_patches, k_hat)
-        print("convolved patches")
-        weights = calc_weights(convolved_patches, q)
+        Rj = calc_Rj(r, last_k)
+        col_r = convolve_patches(Rj, last_k)
+        col_q = im2col(q, (PATCH_SIZE_RESCALED, PATCH_SIZE_RESCALED))
+        #convolved_patches = convolve_patches(r, last_k)
+        #print("convolved patches")
+        #downsampled_patches = calc_downscaled_patches(convolved_patches, ALPHA)
+        #print("shrunk patches")
+        #col_r, col_q = columnise_patches(downsampled_patches, q)
+        print("columnised patches")
+        weights = calc_weights(col_r, col_q)
         print("calculated weights")
-        k_hat = calc_k(downsampled_patches, q, weights)
+        #Rj = calc_Rj(col_r, last_k)
+        k_hat = calc_k(Rj, col_q, weights)
         show_and_save(k_hat, "new_kernel_" + str(iter))
         new_convolved_image = convolve2d(gaussImg, k_hat, 'same')
         show_and_save(new_convolved_image, "new_image_" + str(iter))
         iter += 1
         last_rmse_dif = RMSE(new_convolved_image, img)
+
+
 
 
 if __name__ == "__main__":
