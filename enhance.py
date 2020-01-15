@@ -23,6 +23,7 @@ from scipy import fftpack, signal
 import math
 from scipy.sparse import csgraph
 from PIL import Image
+from scipy.fftpack import fft2, ifft2, fftshift
 # from AnnoyKNN import *
 
 ALPHA = 2
@@ -165,6 +166,22 @@ def convolve_patches(Rjs, kernel):
         col_r.append(np.matmul(rj, kernel))
     return col_r
 
+def expand_kernel(img, kernel):
+    pad_lim_x = (np.shape(img)[0] - np.shape(kernel)[0]) / 2
+    pad_lim_y = (np.shape(img)[1] - np.shape(kernel)[1]) / 2
+    pad_lim_x_0 = pad_lim_x
+    pad_lim_x_1 = pad_lim_x
+    pad_lim_y_0 = pad_lim_y
+    pad_lim_y_1 = pad_lim_y
+    if np.mod(np.shape(img)[0] - np.shape(kernel)[0], 2) == 1:
+        pad_lim_x_0 = pad_lim_x + 0.5
+        pad_lim_x_1 = pad_lim_x - 0.5
+    if np.mod(np.shape(img)[1] - np.shape(kernel)[1], 2) == 1:
+        pad_lim_y_0 = pad_lim_y + 0.5
+        pad_lim_y_1 = pad_lim_y - 0.5
+    padded_kernel = np.pad(kernel, ((int(pad_lim_x_0), int(pad_lim_x_1)), (int(pad_lim_y_0), int(pad_lim_y_1))),
+                           'constant', constant_values=((0, 0), (0, 0)))
+    return padded_kernel
 """
 def convolve_patches(patches, kernel):
     convolved_patches = []
@@ -189,11 +206,11 @@ def columnise_patches(r, q):
 
 
 def calc_weights_nominative(q, r):
-    return np.exp(((-0.5) * math.pow((numpy.linalg.norm(q - r)) / SIGMA, 2)))
+    return np.exp((-0.5) * math.pow((numpy.linalg.norm(q - r)) / SIGMA, 2))
 
 
 def calc_weights(r, q):
-    weights = [[0] * len(r) for i in range(len(q))]
+    weights = np.zeros((len(q), len(r)), dtype=float)#[[0] * len(r) for i in range(len(q))]
     for i in range(len(q)):
         sum = 0
         for j in range(len(r)):
@@ -203,7 +220,7 @@ def calc_weights(r, q):
     return weights
 
 def create_S(m, n):
-    S = np.zeros((math.ceil(m/ALPHA), pow(m-n+1, 2)))
+    S = np.zeros((math.ceil(pow(m/ALPHA, 2)), pow(m-n+1, 2)))
     i = 1
     j = 0
     while j < S.shape[0]:
@@ -212,35 +229,54 @@ def create_S(m, n):
         else:
             S[j][i-1] = 1
             i += 1
-            j += 1
+        j += 1
 
     return S
 
-def create_Rj(patch, k):
-    C = im2col_new(patch, (KERNEL_SIZE, KERNEL_SIZE))
-    S = create_S(patch.shape[0], KERNEL_SIZE)
+def create_Rj(patch):
+    C = np.array(im2col_new(patch, (KERNEL_SIZE, KERNEL_SIZE)))
+    S = np.array(create_S(patch.shape[0], KERNEL_SIZE))
     Rj = np.matmul(S, C)
     return Rj
 
-def calc_Rj(r, k):
+def calc_Rj(r):
     Rj = []
     for patch in r:
-        Rj.append(create_Rj(patch, k))
+        Rj.append(create_Rj(patch))
     return Rj
 
-def calc_k(r, q, weights):
-    first_matrix = [[0.] * pow(KERNEL_SIZE, 2) for i in range(pow(KERNEL_SIZE, 2))]
-    second_matrix = [[0.] * 1 for i in range(pow(KERNEL_SIZE, 2))]
-    first_matrix = np.array(first_matrix)
-    second_matrix = np.array(second_matrix)
+def unpack_q(q):
+    unpacked_q = []
+    for patch in q:
+        #patch = np.array(patch)
+        patch = np.reshape(patch, (pow(PATCH_SIZE_RESCALED, 2), 1))
+        unpacked_q.append(patch)
+    return unpacked_q
+
+
+def calc_k(r, q, weights, C):
+    first_matrix = np.zeros((pow(KERNEL_SIZE, 2), pow(KERNEL_SIZE, 2)), dtype=float)#[[0.] * pow(KERNEL_SIZE, 2) for i in range(pow(KERNEL_SIZE, 2))]
+    second_matrix = np.zeros((pow(KERNEL_SIZE, 2), 1), dtype=float)#[[0.] * 1 for i in range(pow(KERNEL_SIZE, 2))]
+    #first_matrix = np.array(first_matrix)
+    #second_matrix = np.array(second_matrix)
 
     for i in range(len(q)):
         for j in range(len(r)):
-            first_matrix += weights[i][j] * np.matmul(np.transpose(r[j]), r[j])
+            first_matrix += weights[i][j] * np.matmul(np.transpose(r[j]), r[j]) + C
             second_matrix += weights[i][j] * np.matmul(np.transpose(r[j]), q[i])
-    first_matrix = first_matrix / pow(SIGMA, 2)
+    first_matrix = first_matrix #/ pow(SIGMA, 2)
     k_hat = np.matmul(np.linalg.inv(first_matrix), second_matrix)
     return k_hat
+
+def weiner_filter(img, kernel, K=0.01):
+    padded_kernel = expand_kernel(img, kernel)
+    y = np.copy(img)
+    Y = fft2(y)
+    H = fft2(padded_kernel)
+    G = np.conj(H) / (np.abs(H) ** 2 + K)
+    Y_hat = G * Y
+    y_hat = np.abs(fftshift(ifft2(Y_hat)))
+    return y_hat
 
 def main():
     img = plt.imread('DIPSourceHW2.png')
@@ -257,7 +293,7 @@ def main():
     downsampledGImg = downscale(gaussImg, ALPHA)
     downsampleSImg = downscale(sincImg, ALPHA)
 
-    #show_image(img, 'image_original')
+    show_image(img, 'image_original')
     #show_and_save(gaussImg, 'image_gaussian')
     #show_and_save(sincImg, 'image_sinc')
     #show_and_save(downsampledGImg, 'image_gaussian_downsampled')
@@ -284,12 +320,15 @@ def main():
     q = low_res_patches_q_gauss
     q = np.array(q)
     iter = 1
-    Rj = []
+    rmserror = 0
+    Rj = calc_Rj(r)
+    D = laplacian(pow(KERNEL_SIZE, 2) , pow(KERNEL_SIZE, 2) / 2 )
+    C = np.matmul(np.transpose(D), D)
+
     while last_rmse_dif > 0:
         last_k = k_hat
-        Rj = calc_Rj(r, last_k)
         col_r = convolve_patches(Rj, last_k)
-        col_q = im2col(q, (PATCH_SIZE_RESCALED, PATCH_SIZE_RESCALED))
+        col_q = unpack_q(q)
         #convolved_patches = convolve_patches(r, last_k)
         #print("convolved patches")
         #downsampled_patches = calc_downscaled_patches(convolved_patches, ALPHA)
@@ -299,12 +338,15 @@ def main():
         weights = calc_weights(col_r, col_q)
         print("calculated weights")
         #Rj = calc_Rj(col_r, last_k)
-        k_hat = calc_k(Rj, col_q, weights)
+        k_hat = np.reshape(calc_k(Rj, col_q, weights, C), (KERNEL_SIZE, KERNEL_SIZE))
         show_and_save(k_hat, "new_kernel_" + str(iter))
-        new_convolved_image = convolve2d(gaussImg, k_hat, 'same')
+        new_convolved_image = weiner_filter(gaussImg, k_hat)
         show_and_save(new_convolved_image, "new_image_" + str(iter))
         iter += 1
-        last_rmse_dif = RMSE(new_convolved_image, img)
+        last_rmse_dif = RMSE(new_convolved_image, img) - rmserror
+        print(last_rmse_dif)
+        rmserror = RMSE(new_convolved_image, img)
+        k_hat = k_hat.reshape((49, 1))
 
 
 
